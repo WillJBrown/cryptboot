@@ -1,0 +1,10 @@
+[Unit]
+Description=Runs cryptboot umount after system is running since these partitions are no longer needed
+
+[Service]
+Type=oneshot
+ExecStart=/home/will/cryptboot/cryptboot umount
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
