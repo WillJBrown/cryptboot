@@ -70,6 +70,11 @@ if ! findmnt -sn "$BOOT_DIR" &>/dev/null; then
   exit 1
 fi
 
+# Check if /boot keyfile exists - lack of a default value is deliberate
+if ! [[ -f "$BOOT_KEYFILE" ]]; then
+  echo "Couldn't find Keyfile for the boot partition at $BOOT_KEYFILE, check your cryptboot-config if you want to use one"
+fi
+
 # Check if /boot/efi mountpoint exists
 if ! findmnt -sn "$EFI_DIR" &>/dev/null; then
   echo "Couldn't find EFI System partition mountpoint '$EFI_DIR', check your /etc/fstab"
@@ -79,45 +84,65 @@ fi
 # Main program
 case "$1" in
   mount)
-    if findmnt -n "$BOOT_DIR" &>/dev/null || findmnt -n "$EFI_DIR" &>/dev/null; then
-      echo "Boot partition or EFI System partition already mounted, skipping mount..."
-      exit 1
+    temp=0
+    if findmnt -n "$BOOT_DIR" &>/dev/null; then
+      echo "Boot partition mounted, skipping mount..."
+      temp=1
+    else
+      echo "Unlocking encrypted boot partition..."
+      if [[ -f "$BOOT_KEYFILE" ]]; then
+        cryptsetup luksOpen "$BOOT_CRYPT_DEV" "$BOOT_CRYPT_NAME" --key-file "$BOOT_KEYFILE"
+      else
+        cryptsetup open "$BOOT_CRYPT_DEV" "$BOOT_CRYPT_NAME"
+      fi
+
+      echo "Mounting boot partition..."
+      mount "$BOOT_DIR"
     fi
 
-    echo "Unlocking encrypted boot partition..."
-    cryptsetup open "$BOOT_CRYPT_DEV" "$BOOT_CRYPT_NAME"
-
-    echo "Mounting boot partition..."
-    mount "$BOOT_DIR"
-
-    echo "Mounting EFI System partition..."
-    mount "$EFI_DIR"
+    if findmnt -n "$EFI_DIR" &>/dev/null; then
+      echo "EFI System partition already mounted, skipping mount..."
+      temp=1
+    else
+      echo "Mounting EFI System partition..."
+      mount "$EFI_DIR"
+    fi
+    exit $temp
     ;;
   umount)
-    if ! findmnt -n "$BOOT_DIR" &>/dev/null || ! findmnt -n "$EFI_DIR" &>/dev/null; then
-      echo "Boot partition or EFI System partition not mounted, skipping unmount..."
+    if ! findmnt -n "$EFI_DIR" &>/dev/null; then
+      echo "EFI System partition not mounted, skipping unmount..."
       exit 1
     fi
 
     echo "Unmounting EFI System partition..."
     umount "$EFI_DIR"
-
-    echo "Unmounting boot partition..."
-    umount "$BOOT_DIR"
-
-    echo "Locking encrypted boot partition..."
-    cryptsetup close "$BOOT_CRYPT_NAME"
     ;;
   update-grub)
-    echo "Regenerating GRUB config file..."
-    grub-mkconfig -o "$BOOT_DIR/grub/grub.cfg"
+    $0 grub-install
+
+    $0 grub-mkconfig
+    ;;
+  grub-install)
+    $0 mount
 
     echo "Reinstalling GRUB to EFI System partition..."
-    grub-install --target=x86_64-efi --boot-directory="$BOOT_DIR" --efi-directory="$EFI_DIR" --bootloader-id="$EFI_ID_GRUB"
+    /usr/bin/grub-install --target=x86_64-efi --boot-directory="$BOOT_DIR" --efi-directory="$EFI_DIR" --bootloader-id="$EFI_ID_GRUB" --modules="normal test btrfs cryptodisk ext2 jpeg luks lvm multiboot ntfs reboot video_fb efi_gop efi_uga search echo linux all_video video videotest videoinfo gfxmenu gfxterm_background gfxterm_menu gfxterm loadenv configfile tpm" --disable-shim-lock --recheck
+#    /usr/bin/grub-install --target=x86_64-efi --boot-directory="$BOOT_DIR" --efi-directory="$EFI_DIR" --bootloader-id="$EFI_ID_GRUB" --recheck
 
     echo "Signing GRUB with UEFI Secure Boot keys..."
     "$EFIKEYS_BIN" sign "$EFI_DIR/$EFI_PATH_GRUB"
     sync
+
+    $0 umount
+    ;;
+  grub-mkconfig)
+    $0 mount
+
+    echo "Regenerating GRUB config file..."
+    /usr/bin/grub-mkconfig -o "$BOOT_DIR/grub/grub.cfg"
+
+    $0 umount
     ;;
   upgrade)
     $0 mount
@@ -125,8 +150,9 @@ case "$1" in
     $PKG_UPGRADE_CMD
     if [[ "$BOOT_LOADER" = "GRUB" ]]; then
       $0 update-grub
+    else
+      $0 umount
     fi
-    $0 umount
     ;;
   *)
     echo "Usage: $(basename "$0") {mount|umount|update-grub|upgrade}"
